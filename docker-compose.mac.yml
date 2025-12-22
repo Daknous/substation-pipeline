@@ -1,0 +1,10 @@
+# docker-compose.mac.yml
+services:
+  qgis_smoke:
+    platform: linux/amd64
+
+  osm_fetch:
+    platform: linux/amd64
+
+  qgis_snapshots:
+    platform: linux/amd64

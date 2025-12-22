@@ -1,0 +1,55 @@
+# Large binary files
+*.pth
+*.pt
+*.joblib
+*.pkl
+*.h5
+*.onnx
+*.weights
+
+# Data and Model directories
+data/
+output/
+models/
+input/
+!data/.gitkeep
+!output/.gitkeep
+!models/.gitkeep
+!input/.gitkeep
+
+# Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.cache/
+.pytest_cache/
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Keep small config files
+!models/model_config.json
+!data/qgis/.gitkeep

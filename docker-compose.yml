@@ -1,0 +1,300 @@
+services:
+  prepare_manifest:
+    build:
+      context: .
+      dockerfile: docker/manifest/Dockerfile
+    environment:
+      - PYTHONPATH=/workspace
+    volumes:
+      - ./input:/workspace/input
+      - ./output:/workspace/output
+      - ./data:/workspace/data
+      - ./scripts:/workspace/scripts
+      - ./src:/workspace/src
+    working_dir: /workspace
+    restart: "no"
+    command:
+      - python
+      - /workspace/scripts/prepare_manifest.py
+      - --in_json
+      - /workspace/input/substations.json
+      - --out_csv
+      - /workspace/data/manifests/substations_manifest.csv
+
+  qgis_smoke:
+    profiles: ["debug"]
+    build:
+      context: .
+      dockerfile: docker/qgis/Dockerfile
+    environment:
+      - QT_QPA_PLATFORM=offscreen
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
+      - HOME=/tmp
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./configs:/workspace/configs
+    working_dir: /workspace
+    command:
+      - python3
+      - /workspace/configs/qgis_smoke_test.py
+      - --project
+      - /workspace/data/qgis/image_snapshots_latest.qgz
+      - --expect_layer
+      - Google Satellite
+      - --test_render_out
+      - /workspace/output/_smoke_render.png
+
+  osm_fetch:
+    build:
+      context: .
+      dockerfile: docker/qgis/Dockerfile
+    environment:
+      - OVERPASS_URLS=https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass.osm.jp/api/interpreter
+      - PYTHONPATH=/workspace
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/workspace/data
+      - ./configs:/workspace/configs
+      - ./src:/workspace/src
+      - ./output:/workspace/output
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      prepare_manifest:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        test -f /workspace/data/manifests/substations_manifest.csv || \
+          (echo "❌ Missing /workspace/data/manifests/substations_manifest.csv. Run: docker compose run --rm prepare_manifest" && exit 1)
+
+        mkdir -p /workspace/data/footprints
+
+        python3 /workspace/configs/osm_fetch_footprints.py \
+          --mapping_csv /workspace/data/manifests/substations_manifest.csv \
+          --out_dir /workspace/data/footprints \
+          --radius_m 600 \
+          --fail_soft \
+          --request_timeout_sec 60 \
+          --resume \
+          --require_found
+
+        # Ensure the CSV exists even if Overpass totally failed
+        test -f /workspace/data/footprints/footprints.csv || \
+          (echo "⚠️ No footprints.csv produced; writing empty placeholder" && \
+          printf "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude,Name,Voltages\n" > /workspace/data/footprints/footprints.csv)
+
+  qgis_snapshots:
+    build:
+      context: .
+      dockerfile: docker/qgis/Dockerfile
+    environment:
+      - QT_QPA_PLATFORM=offscreen
+      - QT_OPENGL=software
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
+      - HOME=/tmp
+      - PYTHONPATH=/workspace
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./configs:/workspace/configs
+      - ./src:/workspace/src
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      osm_fetch:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        test -f /workspace/data/manifests/substations_manifest.csv || \
+          (echo "❌ Missing manifest. Run: docker compose --profile tools run --rm prepare_manifest" && exit 1)
+
+        mkdir -p /workspace/data/snapshots
+
+        if test -f /workspace/data/footprints/footprints.csv && [ "$(wc -l < /workspace/data/footprints/footprints.csv)" -gt 1 ]; then
+          echo "✅ Using footprints extent"
+          python3 /workspace/configs/regenerate_highres_headless.py \
+            --project /workspace/data/qgis/image_snapshots_latest.qgz \
+            --mapping_csv /workspace/data/manifests/substations_manifest.csv \
+            --output_dir /workspace/data/snapshots \
+            --wms_layer_name "Google Satellite" \
+            --buffer_m 300 \
+            --img_size_px 1024 \
+            --dpi 300 \
+            --csv_filename image_meters_per_px.csv \
+            --footprints_csv /workspace/data/footprints/footprints.csv \
+            --use_footprint_extent \
+            --footprint_pad_m 50 \
+            --context_pad_m 100 \
+            --min_extent_m 600 \
+            --skip_existing
+        else
+          echo "⚠️ Footprints missing/empty → fallback to buffer-based snapshots"
+          python3 /workspace/configs/regenerate_highres_headless.py \
+            --project /workspace/data/qgis/image_snapshots_latest.qgz \
+            --mapping_csv /workspace/data/manifests/substations_manifest.csv \
+            --output_dir /workspace/data/snapshots \
+            --wms_layer_name "Google Satellite" \
+            --buffer_m 300 \
+            --img_size_px 1024 \
+            --dpi 300 \
+            --csv_filename image_meters_per_px.csv \
+            --skip_existing
+        fi
+
+        # user-facing copy
+        mkdir -p /workspace/output/snapshots
+        cp -f /workspace/data/snapshots/*.png  /workspace/output/snapshots/ 2>/dev/null || true
+        cp -f /workspace/data/snapshots/*.pngw /workspace/output/snapshots/ 2>/dev/null || true
+        cp -f /workspace/data/snapshots/image_meters_per_px.csv /workspace/output/snapshots/ 2>/dev/null || true
+
+  unet_infer:
+    build:
+      context: .
+      dockerfile: docker/unet/Dockerfile
+    environment:
+      - PYTHONPATH=/workspace
+      - TORCH_HOME=/workspace/data/.cache/torch
+      - HF_HOME=/workspace/data/.cache/huggingface
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./models:/workspace/models:ro
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      qgis_snapshots:
+        condition: service_completed_successfully
+    command:
+      - python
+      - /workspace/scripts/run_unet_inference.py
+      - --images_dir
+      - /workspace/data/snapshots
+      - --output_dir
+      - /workspace/output/unet_results
+      - --model_pth
+      - /workspace/models/unet.pth
+      - --encoder_name
+      - resnet34
+      - --encoder_weights
+      - imagenet
+      - --pattern
+      - "*.png"
+      - --device
+      - auto
+      - --allow_no_scale
+      - --scale_manifest_csv
+      - /workspace/data/snapshots/image_meters_per_px.csv
+      - --skip_existing
+
+  capacity_infer:
+    build:
+      context: .
+      dockerfile: docker/unet/Dockerfile
+    environment:
+      - PYTHONPATH=/workspace
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./models:/workspace/models:ro
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      unet_infer:
+        condition: service_completed_successfully
+    command:
+      - python
+      - /workspace/scripts/run_capacity_inference.py
+      - --unet_csv
+      - /workspace/output/unet_results/transformer_detections.csv
+      - --manifest_csv
+      - /workspace/data/manifests/substations_manifest.csv
+      - --model_joblib
+      - /workspace/models/capacity_model.joblib
+      - --model_config
+      - /workspace/models/model_config.json
+      - --out_csv
+      - /workspace/output/capacity_results/transformers_with_capacity.csv
+      - --summary_csv
+      - /workspace/output/capacity_results/substations_capacity_summary.csv
+
+  yolo_infer:
+    build:
+      context: .
+      dockerfile: docker/yolo/Dockerfile
+    environment:
+      - PYTHONPATH=/workspace
+      - YOLO_CONFIG_DIR=/tmp/Ultralytics
+    volumes:
+      - ./data:/workspace/data
+      - ./output:/workspace/output
+      - ./models:/workspace/models:ro
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+    working_dir: /workspace
+    restart: "no"
+    depends_on:
+      qgis_snapshots:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        mkdir -p /workspace/output/yolo_results/annotated
+        python /workspace/scripts/run_yolo_inference.py \
+          --images_dir /workspace/data/snapshots \
+          --model_pt /workspace/models/yolo.pt \
+          --out_csv /workspace/output/yolo_results/yolo_detections.csv \
+          --summary_csv /workspace/output/yolo_results/yolo_summary.csv \
+          --out_annotated_dir /workspace/output/yolo_results/annotated \
+          --pattern "*.png" \
+          --conf 0.25 \
+          --iou 0.45 \
+          --device cpu \
+          --skip_existing
+
+  score:
+    build:
+      context: .
+      dockerfile: docker/score/Dockerfile
+    environment:
+      - PYTHONPATH=/workspace
+    volumes:
+      - ./data:/workspace/data
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+      - ./input:/workspace/input
+      - ./output:/workspace/output
+    working_dir: /workspace
+    depends_on:
+      capacity_infer:
+        condition: service_completed_successfully
+      yolo_infer:
+        condition: service_completed_successfully
+    command:
+      - python
+      - /workspace/scripts/run_substation_scoring.py
+      - --manifest_csv
+      - /workspace/data/manifests/substations_manifest.csv
+      - --capacity_summary_csv
+      - /workspace/output/capacity_results/substations_capacity_summary.csv
+      - --unet_csv
+      - /workspace/output/unet_results/transformer_detections.csv
+      - --yolo_summary_csv
+      - /workspace/output/yolo_results/yolo_summary.csv
+      - --yolo_detections_csv
+      - /workspace/output/yolo_results/yolo_detections.csv
+      - --out_csv
+      - /workspace/output/score_results/substations_scored.csv
