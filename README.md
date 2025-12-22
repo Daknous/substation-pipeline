@@ -6,18 +6,15 @@ Automated pipeline for analyzing electrical substation satellite imagery to asse
 
 ```bash
 # Clone repository
-git clone <repo-url>
+git clone https://github.com/Daknous/substation-pipeline.git
 cd full_pipeline
-
-# Check requirements
-./pipeline.sh status
 
 # Add your data
 cp /path/to/substations.json input/
 cp /path/to/models/* models/
 
 # Run pipeline
-./pipeline.sh run
+docker compose up
 ```
 
 ## Using the CLI
