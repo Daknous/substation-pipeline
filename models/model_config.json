@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "model_name": "capacity_mva_gboost_v1",
+  "model_type": "GradientBoostingRegressor",
+  "target": {
+    "name": "capacity_mva",
+    "unit": "MVA"
+  },
+  "feature_names": [
+    "Area_m2",
+    "Primary_Voltage_kV",
+    "Secondary_Voltage_kV",
+    "Voltage_Levels",
+    "Voltage_Ratio",
+    "Has_Secondary",
+    "Has_Voltage_Ratio"
+  ]
+}

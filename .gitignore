@@ -7,14 +7,23 @@
 *.onnx
 *.weights
 
-# Data and Model directories
-data/
-output/
-models/
-input/
+# Data and Model directories - ignore contents but keep structure
+data/*
 !data/.gitkeep
+!data/*/
+data/*/*
+!data/*/.gitkeep
+
+output/*
 !output/.gitkeep
+!output/*/
+output/*/*
+!output/*/.gitkeep
+
+models/*
 !models/.gitkeep
+
+input/*
 !input/.gitkeep
 
 # Cache
