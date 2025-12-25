@@ -16,14 +16,6 @@ class CapacityArtifacts:
 
 
 class CapacityPredictor:
-    """
-    Loads the trained regressor and predicts MVA + class.
-
-    Degrade rules (recommended):
-      - if area_m2 missing/NaN/<=0 -> (None, "unknown")
-      - if voltage_str missing/empty -> (None, "unknown")   # avoid garbage predictions
-    """
-
     def __init__(self, artifacts: CapacityArtifacts):
         self.model = joblib.load(str(artifacts.model_path))
 
@@ -32,7 +24,7 @@ class CapacityPredictor:
         if not self.feature_names:
             raise ValueError(f"model_config.json missing 'feature_names': {artifacts.config_path}")
 
-        # Hard safety: ensure our preprocessing feature order matches training
+        # Hard safety: ensure the preprocessing feature order matches training
         if list(self.feature_names) != list(FEATURE_NAMES):
             raise ValueError(
                 "Feature order mismatch between model_config.json and preprocessing.FEATURE_NAMES.\n"
@@ -69,7 +61,7 @@ class CapacityPredictor:
         if not np.isfinite(a) or a <= 0:
             return None, "unknown"
 
-        # guard: no voltage -> no capacity (recommended)
+        # guard: no voltage -> no capacity
         vstr = (voltage_str or "").strip()
         if not vstr:
             return None, "unknown"
