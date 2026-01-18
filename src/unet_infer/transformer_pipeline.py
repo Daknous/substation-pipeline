@@ -328,15 +328,17 @@ class TransformerSegmentationPipeline:
 # Batch Processor (single-model inference)
 # =============================================================================
 class BatchTransformerProcessor:
-    def __init__(self, output_dir, model, preprocess, device, allow_no_scale=True, debug_bridge=False, skip_existing=False):
+    def __init__(self, output_dir, model, preprocess, device, allow_no_scale=True, debug_bridge=False, skip_existing=False, save_images=True):
+        self.save_images = save_images
         self.output_dir = output_dir
         self.overlay_dir = os.path.join(output_dir, "overlays")
         self.mask_dir = os.path.join(output_dir, "masks")
         self.csv_path = os.path.join(output_dir, "transformer_detections.csv")
 
         os.makedirs(self.output_dir, exist_ok=True)
-        os.makedirs(self.overlay_dir, exist_ok=True)
-        os.makedirs(self.mask_dir, exist_ok=True)
+        if self.save_images:
+            os.makedirs(self.overlay_dir, exist_ok=True)
+            os.makedirs(self.mask_dir, exist_ok=True)
 
         self.model = model
         self.preprocess = preprocess
@@ -576,12 +578,12 @@ class BatchTransformerProcessor:
         probs = self.run_inference_probs(img_pil)
         labeled, info = self.pipeline.process(probs, area_per_px_m2 if scale_ok else np.nan)
 
-        # always save overlay + mask
-        base = os.path.splitext(filename)[0]
-        overlay_path = os.path.join(self.overlay_dir, f"{base}_overlay.png")
-        Image.fromarray(self.create_overlay(img_np, labeled)).save(overlay_path)
-        np.save(os.path.join(self.mask_dir, f"{base}_labels.npy"), labeled.astype(np.int32))
-
+        # Only save overlay + mask if save_images is True
+        if self.save_images:
+            base = os.path.splitext(filename)[0]
+            overlay_path = os.path.join(self.overlay_dir, f"{base}_overlay.png")
+            Image.fromarray(self.create_overlay(img_np, labeled)).save(overlay_path)
+            np.save(os.path.join(self.mask_dir, f"{base}_labels.npy"), labeled.astype(np.int32))
         if labeled.max() == 0:
             return
 

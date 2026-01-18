@@ -1,140 +1,131 @@
 # Substation Extensibility Pipeline
 
-Automated pipeline for analyzing electrical substation satellite imagery to assess extensibility potential.
+Automated analysis of electrical substation satellite imagery to assess expansion potential using computer vision and machine learning.
 
 ## Quick Start
 
 ```bash
-# Clone repository
+# 1. Clone repository
 git clone https://github.com/Daknous/substation-pipeline.git
-cd full_pipeline
+cd substation-pipeline
 
-# Add your data
+# 2. Add your data
 cp /path/to/substations.json input/
 cp /path/to/models/* models/
 
-# Run pipeline
-docker compose up
+# 3. Run pipeline
+./pipeline.sh run
 ```
 
-## Using the CLI
+## Prerequisites
 
-The `pipeline.sh` script is a CLI that provides user-friendly execution:
+- Docker & Docker Compose
+- Input data: `input/substations.json`
+- Model files: `models/` (unet.pth, yolo.pt, capacity_model.joblib)
+- QGIS project: `data/qgis/image_snapshots_latest.qgz` (optional)
+
+## Usage
+
+### Basic Commands
 
 ```bash
-# Update to latest version
-./pipeline.sh pull
-./pipeline.sh build
+./pipeline.sh run         # Run complete pipeline
+./pipeline.sh status      # Check pipeline status
+./pipeline.sh clean       # Clean all outputs
+./pipeline.sh help        # Show all commands
+```
 
-# Run full pipeline
+### Configuration
+
+Create `.env` file to customize behavior:
+
+```bash
+# Skip image outputs (CSV only, saves disk space)
+PIPELINE_NO_IMAGES=true
+
+# OSM fetch settings
+REQUEST_TIMEOUT_SEC=60
+OSM_FETCH_MAX_TIME=300
+```
+
+### Run Modes
+
+```bash
+# Default mode (respects .env settings)
 ./pipeline.sh run
+
+# Force run with all image outputs
+./pipeline.sh run with-images
 
 # Run specific service
-./pipeline.sh run service qgis_snapshots
-
-# Check status
-./pipeline.sh status
-
-# View logs
-./pipeline.sh logs          # All services
-./pipeline.sh logs unet     # Specific service
-
-# Stop pipeline
-./pipeline.sh stop
-
-# Clean outputs (careful!)
-./pipeline.sh clean
+./pipeline.sh service osm_fetch
 ```
 
-## User Guide
+## Pipeline Stages
 
-### Daily Workflow
+| Stage | Purpose | Output |
+|-------|---------|--------|
+| `prepare_manifest` | Parse input JSON | `data/manifests/substations_manifest.csv` |
+| `osm_fetch` | Fetch OSM footprints | `data/footprints/footprints.csv` |
+| `qgis_snapshots` | Generate satellite images | `data/snapshots/*.png` |
+| `unet_infer` | Detect transformers | `output/unet_results/transformer_detections.csv` |
+| `yolo_infer` | Detect components | `output/yolo_results/yolo_summary.csv` |
+| `capacity_infer` | Estimate capacity | `output/capacity_results/substations_capacity_summary.csv` |
+| `score` | Calculate final scores | `output/score_results/substations_scored.csv` |
 
-1. **Update and run with new substations:**
+## Output Structure
+
+```
+output/
+├── unet_results/           # Transformer detections
+│   ├── transformer_detections.csv
+│   ├── overlays/          # (if images enabled)
+│   └── masks/             # (if images enabled)
+├── yolo_results/           # Component detections
+│   ├── yolo_summary.csv
+│   ├── yolo_detections.csv
+│   └── annotated/         # (if images enabled)
+├── capacity_results/       # Capacity estimates
+│   └── substations_capacity_summary.csv
+└── score_results/          # Final scores
+    └── substations_scored.csv
+```
+
+## Incremental Processing
+
+The pipeline automatically skips already-processed substations:
+- OSM fetch resumes from last successful query
+- Snapshots skip existing images
+- ML inference skips completed detections
+
+Add new substations to `input/substations.json` and run again - only new items are processed.
+
+## Troubleshooting
+
+**Pipeline fails at OSM fetch:**
 ```bash
-# Morning: pull latest code
-./pipeline.sh pull
-./pipeline.sh build
+# OSM servers can be overloaded. Either:
+# 1. Wait and retry
+./pipeline.sh service osm_fetch
 
-# Add new substations to input/substations.json
-# Then run (will only process new ones)
+# 2. Skip OSM and use fixed buffer
+mkdir -p data/footprints
+echo "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude,Name,Voltages" > data/footprints/footprints.csv
 ./pipeline.sh run
 ```
 
-2. **Check progress:**
+**Check what's running:**
 ```bash
 ./pipeline.sh status
 ./pipeline.sh logs
 ```
 
-3. **Get results:**
+**Reset and start fresh:**
 ```bash
-ls -la output/score_results/
-```
-
-### Setting Up Remote Repository
-
-```bash
-# Set repository URL
-export PIPELINE_REPO_URL=https://github.com/yourorg/substation-pipeline.git
-
-# Initialize and push
-./pipeline.sh init
-git push -u origin main
-```
-
-## Pipeline Architecture
-
-```
-Input (substations.json)
-    ↓
-[prepare_manifest] → CSV manifest
-    ↓
-[osm_fetch] → Footprint geometries (resume-able)
-    ↓
-[qgis_snapshots] → Satellite images (skip existing)
-    ↓
-    ├→ [unet_infer] → Transformer segmentation (skip existing)
-    │      ↓
-    │   [capacity_infer] → MVA estimation
-    │
-    └→ [yolo_infer] → Component detection (skip existing)
-           ↓
-       [score] → Final extensibility scores
-```
-
-## Incremental Processing
-
-The pipeline intelligently skips already-processed substations:
-- ✅ OSM fetch: `--resume` flag
-- ✅ QGIS snapshots: `--skip_existing` flag  
-- ✅ U-Net inference: `--skip_existing` flag
-- ✅ YOLO inference: `--skip_existing` flag
-
-When you add new substations, only the new ones are processed!
-
-## Troubleshooting
-
-### Pipeline won't start
-```bash
-./pipeline.sh status    # Check what's missing
-docker compose logs     # Check for errors
-```
-
-### Reset everything
-```bash
-./pipeline.sh stop
 ./pipeline.sh clean
 ./pipeline.sh run
 ```
 
-### Manual service control
-```bash
-# Skip to specific stage
-docker compose run --rm unet_infer
-
-# Rebuild single service
-docker compose build qgis_snapshots
-```
-
 ## License
+
+[Add license information]

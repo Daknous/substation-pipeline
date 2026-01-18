@@ -6,16 +6,20 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+DIM='\033[2m'
 NC='\033[0m' # No Color
 
-# Pipeline configuration
-REPO_URL="${PIPELINE_REPO_URL:-}"
-BRANCH="${PIPELINE_BRANCH:-main}"
+# Detect if we're on Mac and need the override file
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    COMPOSE_FILES="-f docker-compose.yml -f docker-compose.mac.yml"
+else
+    COMPOSE_FILES="-f docker-compose.yml"
+fi
 
 print_header() {
-    echo -e "${BLUE}================================${NC}"
-    echo -e "${BLUE}  Substation Pipeline Manager${NC}"
-    echo -e "${BLUE}================================${NC}"
+    echo ""
+    echo -e "${BLUE}Substation Pipeline${NC}"
+    echo -e "${DIM}──────────────────────${NC}"
 }
 
 print_success() {
@@ -27,7 +31,7 @@ print_error() {
 }
 
 print_info() {
-    echo -e "${YELLOW}ℹ${NC} $1"
+    echo -e "${YELLOW}•${NC} $1"
 }
 
 check_requirements() {
@@ -36,192 +40,214 @@ check_requirements() {
         exit 1
     fi
     
-    if ! command -v git &> /dev/null; then
-        print_error "Git is not installed"
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose is not installed"
+        exit 1
+    fi
+}
+
+validate_files() {
+    local has_error=false
+    
+    echo -e "${DIM}Checking requirements...${NC}"
+    
+    # Check required files silently
+    if [ ! -f input/substations.json ]; then
+        print_error "input/substations.json missing"
+        has_error=true
+    fi
+    
+    if [ ! -f models/unet.pth ]; then
+        print_error "models/unet.pth missing"
+        has_error=true
+    fi
+    
+    if [ ! -f models/yolo.pt ]; then
+        print_error "models/yolo.pt missing"
+        has_error=true
+    fi
+    
+    if [ ! -f models/capacity_model.joblib ]; then
+        print_error "models/capacity_model.joblib missing"
+        has_error=true
+    fi
+    
+    if [ "$has_error" = true ]; then
+        echo ""
+        print_error "Missing required files"
+        exit 1
+    else
+        print_success "Ready to run"
+    fi
+}
+
+build() {
+    print_info "Building containers..."
+    docker compose $COMPOSE_FILES build --quiet
+    print_success "Build complete"
+}
+
+run() {
+    local with_images="${1:-}"
+    
+    validate_files
+    echo ""
+    
+    if [ "$with_images" = "with-images" ]; then
+        print_info "Mode: WITH images"
+        PIPELINE_NO_IMAGES=false docker compose $COMPOSE_FILES up --abort-on-container-exit
+    else
+        if grep -q "PIPELINE_NO_IMAGES=true" .env 2>/dev/null; then
+            print_info "Mode: CSV only (no images)"
+        else
+            print_info "Mode: Full output (with images)"
+        fi
+        docker compose $COMPOSE_FILES up --abort-on-container-exit
+    fi
+    
+    echo ""
+    show_results_compact
+}
+
+run_service() {
+    local service="$1"
+    if [ -z "$service" ]; then
+        print_error "Specify a service name"
+        echo ""
+        echo "Available:"
+        docker compose $COMPOSE_FILES config --services | sed 's/^/  • /'
         exit 1
     fi
     
-    print_success "All requirements met"
-}
-
-pull_updates() {
-    print_info "Pulling latest changes from $BRANCH..."
-    
-    if [ ! -d .git ]; then
-        print_error "Not a git repository. Run 'init' first."
-        exit 1
-    fi
-    
-    # Stash any local changes
-    if [[ -n $(git status -s) ]]; then
-        print_info "Stashing local changes..."
-        git stash push -m "Auto-stash before pull $(date +%Y%m%d_%H%M%S)"
-    fi
-    
-    git pull origin "$BRANCH"
-    print_success "Updated to latest version"
-    
-    # Show if there are stashed changes
-    if git stash list | grep -q "Auto-stash"; then
-        print_info "You have stashed changes. Run 'git stash pop' to restore them."
-    fi
-}
-
-build_containers() {
-    print_info "Building Docker containers..."
-    docker compose build
-    print_success "Containers built successfully"
-}
-
-run_pipeline() {
-    local mode="${1:-full}"
-    
-    case "$mode" in
-        full)
-            print_info "Running full pipeline..."
-            docker compose up
-            ;;
-        incremental)
-            print_info "Running incremental pipeline (skip existing)..."
-            docker compose up
-            ;;
-        service)
-            if [ -z "$2" ]; then
-                print_error "Please specify a service name"
-                echo "Available services:"
-                docker compose config --services | sed 's/^/  - /'
-                exit 1
-            fi
-            print_info "Running service: $2"
-            docker compose up "$2"
-            ;;
-        *)
-            print_error "Unknown mode: $mode"
-            echo "Available modes: full, incremental, service <name>"
-            exit 1
-            ;;
-    esac
+    print_info "Running: $service"
+    docker compose $COMPOSE_FILES run --rm "$service"
 }
 
 status() {
     print_header
-    echo ""
-    echo "Pipeline Status:"
-    echo "----------------"
-    docker compose ps
     
-    echo ""
-    echo "Repository Status:"
-    echo "------------------"
-    if [ -d .git ]; then
-        echo "Branch: $(git branch --show-current)"
-        echo "Last commit: $(git log -1 --oneline)"
-        if [[ -n $(git status -s) ]]; then
-            echo "Local changes: Yes"
+    # Check if results exist
+    if [ -f output/score_results/substations_scored.csv ]; then
+        local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
+        print_success "Processed $total substations"
+        
+        # Check output mode
+        if [ -d output/unet_results/overlays ] || [ -d output/yolo_results/annotated ]; then
+            echo -e "${DIM}Output: Full (with images)${NC}"
         else
-            echo "Local changes: No"
+            echo -e "${DIM}Output: CSV only${NC}"
         fi
-    else
-        print_info "Not a git repository"
-    fi
-    
-    echo ""
-    echo "Data Status:"
-    echo "------------"
-    [ -f input/substations.json ] && print_success "Input data present" || print_info "No input data"
-    [ -f models/unet.pth ] && print_success "U-Net model present" || print_info "U-Net model missing"
-    [ -f models/yolo.pt ] && print_success "YOLO model present" || print_info "YOLO model missing"
-    [ -f models/capacity_model.joblib ] && print_success "Capacity model present" || print_info "Capacity model missing"
-    
-    if [ -d output/score_results ] && [ "$(ls -A output/score_results 2>/dev/null)" ]; then
+        
         echo ""
-        echo "Latest Results:"
-        echo "---------------"
-        ls -lht output/score_results/*.csv 2>/dev/null | head -5
+        echo "Results: ${DIM}output/score_results/substations_scored.csv${NC}"
+    else
+        print_info "No results yet"
+        echo -e "${DIM}Run './pipeline.sh run' to start${NC}"
     fi
 }
 
-stop_pipeline() {
-    print_info "Stopping pipeline..."
-    docker compose down
-    print_success "Pipeline stopped"
+show_results_compact() {
+    if [ -f output/score_results/substations_scored.csv ]; then
+        local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
+        print_success "Complete: $total substations processed"
+        echo -e "${DIM}Results in: output/score_results/${NC}"
+    else
+        print_error "No results generated"
+    fi
 }
+
+show_results() {
+    if [ -f output/score_results/substations_scored.csv ]; then
+        local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
+        echo ""
+        echo "Results Summary"
+        echo -e "${DIM}───────────────${NC}"
+        echo "Substations: $total"
+        echo "Output: output/score_results/substations_scored.csv"
+        
+        # Simple preview - just first 3 lines, key columns only
+        echo ""
+        echo -e "${DIM}Sample (first 3):${NC}"
+        echo -e "${DIM}─────────────────${NC}"
+        tail -n +1 output/score_results/substations_scored.csv | head -n 4 | \
+            awk -F',' '{printf "%-12s %-8s %-12s %-15s\n", $1, $4, $6, $11}' | \
+            sed '1s/^/\x1b[1m/; 1s/$/\x1b[0m/'
+    else
+        print_info "No results yet"
+    fi
+}
+
+stop() {
+    print_info "Stopping..."
+    docker compose $COMPOSE_FILES down -v 2>/dev/null
+    print_success "Stopped"
+}
+
+# Replace the clean() function (lines 189-197) with this improved version:
 
 clean() {
-    read -p "This will remove all output data. Continue? (y/N) " -n 1 -r
+    echo -n "Clean all outputs? (y/N): "
+    read -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        print_info "Cleaning output directories..."
-        rm -rf output/*
-        rm -rf data/snapshots/*
-        rm -rf data/footprints/*
-        rm -rf data/manifests/*
-        touch output/.gitkeep
-        touch data/.gitkeep
-        print_success "Output directories cleaned"
-    else
-        print_info "Clean cancelled"
+        # Clean files but preserve .gitkeep
+        find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        find data/snapshots -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        find data/footprints -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        find data/manifests -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        
+        # Remove empty subdirectories (but not the main directories with .gitkeep)
+        find output -mindepth 2 -type d -empty -delete 2>/dev/null || true
+        find data -mindepth 2 -type d -empty -delete 2>/dev/null || true
+        
+        # Ensure .gitkeep files exist (restore if accidentally deleted)
+        for dir in output/capacity_results output/score_results output/unet_results output/yolo_results \
+                   data/snapshots data/footprints data/manifests; do
+            mkdir -p "$dir"
+            [ ! -f "$dir/.gitkeep" ] && touch "$dir/.gitkeep"
+        done
+        
+        print_success "Cleaned (preserved .gitkeep files)"
     fi
 }
+
+
 
 logs() {
     local service="${1:-}"
     if [ -z "$service" ]; then
-        docker compose logs --tail=100 -f
+        docker compose $COMPOSE_FILES logs --tail=50 -f
     else
-        docker compose logs --tail=100 -f "$service"
-    fi
-}
-
-init_repo() {
-    if [ -d .git ]; then
-        print_info "Already a git repository"
-        return
-    fi
-    
-    print_info "Initializing git repository..."
-    git init
-    git add .
-    git commit -m "Initial commit: Substation extensibility pipeline"
-    
-    if [ -n "$REPO_URL" ]; then
-        git remote add origin "$REPO_URL"
-        print_success "Repository initialized with remote: $REPO_URL"
-    else
-        print_success "Repository initialized (no remote set)"
-        print_info "Set PIPELINE_REPO_URL environment variable to add remote"
+        docker compose $COMPOSE_FILES logs --tail=50 -f "$service"
     fi
 }
 
 show_help() {
     print_header
-    echo ""
-    echo "Usage: $0 <command> [options]"
+    
+    echo "Usage: $0 <command>"
     echo ""
     echo "Commands:"
-    echo "  init          Initialize git repository"
-    echo "  pull          Pull latest changes from git"
-    echo "  build         Build Docker containers"
-    echo "  run [mode]    Run pipeline (full|incremental|service <name>)"
-    echo "  status        Show pipeline and repository status"
-    echo "  stop          Stop running pipeline"
-    echo "  logs [svc]    Show logs (optionally for specific service)"
-    echo "  clean         Clean output directories"
-    echo "  help          Show this help message"
+    echo "  ${GREEN}run${NC}              Run pipeline"
+    echo "  ${GREEN}run with-images${NC}  Run with all images"
+    echo "  ${GREEN}status${NC}           Check status"
+    echo "  ${GREEN}clean${NC}            Clean outputs"
     echo ""
-    echo "Quick start:"
-    echo "  $0 init                    # Initialize repository"
-    echo "  $0 pull && $0 build       # Update and build"
-    echo "  $0 run                     # Run full pipeline"
+    echo "  service <name>   Run specific service"
+    echo "  logs [service]   View logs"
+    echo "  stop             Stop pipeline"
+    echo "  help             Show this help"
+    
     echo ""
-    echo "Environment variables:"
-    echo "  PIPELINE_REPO_URL   Git repository URL"
-    echo "  PIPELINE_BRANCH     Git branch (default: main)"
+    echo -e "${DIM}Settings:${NC}"
+    if [ -f .env ] && grep -q "PIPELINE_NO_IMAGES=true" .env; then
+        echo -e "${DIM}• Images: Disabled (CSV only)${NC}"
+    else
+        echo -e "${DIM}• Images: Enabled${NC}"
+    fi
 }
 
 # Main script logic
-print_header
-
 if [ $# -eq 0 ]; then
     show_help
     exit 0
@@ -230,24 +256,22 @@ fi
 check_requirements
 
 case "$1" in
-    init)
-        init_repo
-        ;;
-    pull)
-        pull_updates
-        ;;
-    build)
-        build_containers
-        ;;
     run)
         shift
-        run_pipeline "$@"
+        run "$@"
+        ;;
+    service)
+        shift
+        run_service "$@"
+        ;;
+    build)
+        build
         ;;
     status)
         status
         ;;
     stop)
-        stop_pipeline
+        stop
         ;;
     logs)
         shift
@@ -260,8 +284,8 @@ case "$1" in
         show_help
         ;;
     *)
-        print_error "Unknown command: $1"
-        echo "Run '$0 help' for usage information"
+        print_error "Unknown: $1"
+        echo "Try: $0 help"
         exit 1
         ;;
 esac

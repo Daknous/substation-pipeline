@@ -20,7 +20,8 @@ RUN python -m pip install --index-url https://download.pytorch.org/whl/cpu \
 RUN python -m pip install \
     numpy scipy pandas tqdm pillow \
     scikit-image shapely \
-    scikit-learn joblib \
+    scikit-learn==1.6.1 \
+    joblib \
     segmentation-models-pytorch
 
 WORKDIR /workspace

@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 import torch
@@ -34,12 +35,16 @@ def parse_args():
     ap.add_argument("--debug_bridge", action="store_true")
     ap.add_argument("--skip_existing", action="store_true",
                     help="Skip images that already have overlay/mask/CSV entries")
+    ap.add_argument("--no_images", action="store_true",
+                    help="Do not save overlay and mask images")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
 
+    save_images = not (args.no_images or os.getenv("PIPELINE_NO_IMAGES", "").lower() in ("true", "1", "yes"))
+    
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -63,6 +68,7 @@ def main():
         allow_no_scale=args.allow_no_scale,
         debug_bridge=args.debug_bridge,
         skip_existing=args.skip_existing,
+        save_images=save_images,
     )
 
     proc.process_directory(
@@ -73,6 +79,8 @@ def main():
         scale_manifest_csv=args.scale_manifest_csv,
     )
 
+    if not save_images:
+        print("Image outputs were skipped. Only CSV files were saved.")
 
 if __name__ == "__main__":
     main()

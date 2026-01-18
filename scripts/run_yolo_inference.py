@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import csv
 
@@ -28,11 +29,16 @@ def parse_args():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--skip_existing", action="store_true",
                     help="Skip images already in the output CSV")
+    ap.add_argument("--no-images", action="store_true",
+                    help="Skip saving annotated images to save disk space")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
+    
+    # Check environment variable as well for no-images mode
+    save_images = not (args.no_images or os.getenv("PIPELINE_NO_IMAGES", "").lower() in ("true", "1", "yes"))
 
     images_dir = Path(args.images_dir)
     out_csv = Path(args.out_csv)
@@ -41,8 +47,10 @@ def main():
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     summary_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    ann_dir = Path(args.out_annotated_dir) if args.out_annotated_dir else None
-    if ann_dir:
+    # Only create annotated directory if we're saving images
+    ann_dir = None
+    if save_images and args.out_annotated_dir:
+        ann_dir = Path(args.out_annotated_dir)
         ann_dir.mkdir(parents=True, exist_ok=True)
 
     # Load existing results to determine what to skip
@@ -126,8 +134,8 @@ def main():
                     "area_px": w * h,
                 })
 
-        # annotated images (optional)
-        if ann_dir:
+        # Only save annotated images if save_images is True
+        if save_images and ann_dir:
             im = r.plot()  # numpy array (BGR)
             out_path = ann_dir / p.name
             cv2.imwrite(str(out_path), im)
@@ -159,8 +167,11 @@ def main():
     print(f"✅ Complete: Processed={processed_count} | Skipped={skipped_count} | Total={len(img_paths)}")
     print(f"✅ wrote: {out_csv} ({len(rows)} total detections)")
     print(f"✅ wrote: {summary_csv} ({len(summary_rows)} images)")
-    if ann_dir:
+    
+    if save_images and ann_dir:
         print(f"✅ annotated: {ann_dir}")
+    elif not save_images:
+        print(f"📝 Annotated images were skipped (--no-images flag). Only CSV files were saved.")
 
 
 if __name__ == "__main__":

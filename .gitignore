@@ -13,18 +13,28 @@ data/*
 !data/*/
 data/*/*
 !data/*/.gitkeep
+# Keep QGIS project files
+!data/qgis/image_snapshots_latest.qgz
+!data/qgis/image_snapshots_latest.qgd
 
 output/*
 !output/.gitkeep
 !output/*/
 output/*/*
 !output/*/.gitkeep
+# Explicitly preserve subdirectory .gitkeep
+!output/capacity_results/.gitkeep
+!output/score_results/.gitkeep
+!output/unet_results/.gitkeep
+!output/yolo_results/.gitkeep
 
 models/*
 !models/.gitkeep
+!models/model_config.json
 
 input/*
 !input/.gitkeep
+!input/substations.json  # Keep sample input
 
 # Cache
 __pycache__/
@@ -59,6 +69,25 @@ Thumbs.db
 *.log
 logs/
 
-# Keep small config files
-!models/model_config.json
-!data/qgis/.gitkeep
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Archives
+*.tar.gz
+*.zip
+*.rar
+substation-pipeline-submission*
+
+# Keep important docs
+!README.md
+!requirements.txt
+!Dockerfile
+!docker-compose.yml
+!docker-compose.mac.yml

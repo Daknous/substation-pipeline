@@ -50,7 +50,8 @@ services:
       context: .
       dockerfile: docker/qgis/Dockerfile
     environment:
-      - OVERPASS_URLS=https://overpass-api.de/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass.osm.jp/api/interpreter
+      - OVERPASS_URLS=${OVERPASS_URLS:-https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter,https://overpass.openstreetmap.ru/api/interpreter,https://overpass-api.de/api/interpreter}
+      - REQUEST_TIMEOUT_SEC=${REQUEST_TIMEOUT_SEC:-60}
       - PYTHONPATH=/workspace
       - PYTHONUNBUFFERED=1
     volumes:
@@ -69,23 +70,84 @@ services:
       - |
         set -euo pipefail
         test -f /workspace/data/manifests/substations_manifest.csv || \
-          (echo "❌ Missing /workspace/data/manifests/substations_manifest.csv. Run: docker compose run --rm prepare_manifest" && exit 1)
+          (echo "❌ Missing /workspace/data/manifests/substations_manifest.csv" && exit 1)
 
         mkdir -p /workspace/data/footprints
 
+        # Check existing footprints status
+        EXISTING_COUNT=0
+        if [ -f /workspace/data/footprints/footprints.csv ]; then
+          EXISTING_COUNT=$$(tail -n +2 /workspace/data/footprints/footprints.csv | wc -l | tr -d ' ')
+          echo "📂 Found existing footprints.csv with $$EXISTING_COUNT entries"
+        fi
+
+        TOTAL_COUNT=$$(tail -n +2 /workspace/data/manifests/substations_manifest.csv | wc -l | tr -d ' ')
+        
+        if [ "$$EXISTING_COUNT" -eq "$$TOTAL_COUNT" ] && [ "$$EXISTING_COUNT" -gt 0 ]; then
+          echo "✅ All $$TOTAL_COUNT substations already have footprints - skipping fetch"
+          exit 0
+        fi
+
+        echo "🌍 Fetching OSM footprints..."
+        
+        if [ "$$EXISTING_COUNT" -gt 0 ]; then
+          NEW_NEEDED=$$((TOTAL_COUNT - EXISTING_COUNT))
+          echo "📊 Status: Have $$EXISTING_COUNT/$$TOTAL_COUNT footprints"
+          echo "   Need to fetch: ~$$NEW_NEEDED new substations"
+          echo "   Note: Actual new fetches depend on OSM ID overlap"
+        else
+          echo "📊 Fetching all $$TOTAL_COUNT substations (no existing footprints)"
+        fi
+        
+        echo "ℹ️  Process features:"
+        echo "   • Will reuse existing footprints (no re-fetching)"
+        echo "   • Resume from cache if interrupted"
+        echo "   • Try multiple servers if needed"
+        
+        # Run the fetch with resume - it will skip already fetched substations
         python3 /workspace/configs/osm_fetch_footprints.py \
           --mapping_csv /workspace/data/manifests/substations_manifest.csv \
           --out_dir /workspace/data/footprints \
           --radius_m 600 \
           --fail_soft \
-          --request_timeout_sec 60 \
+          --request_timeout_sec $${REQUEST_TIMEOUT_SEC:-60} \
+          --retries 3 \
           --resume \
-          --require_found
-
-        # Ensure the CSV exists even if Overpass totally failed
-        test -f /workspace/data/footprints/footprints.csv || \
-          (echo "⚠️ No footprints.csv produced; writing empty placeholder" && \
-          printf "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude,Name,Voltages\n" > /workspace/data/footprints/footprints.csv)
+          --require_found || OSM_EXIT_CODE=$$?
+        
+        # Check final results
+        if [ -f /workspace/data/footprints/footprints.csv ]; then
+          FINAL_COUNT=$$(tail -n +2 /workspace/data/footprints/footprints.csv | wc -l | tr -d ' ')
+          NEW_FETCHED=$$((FINAL_COUNT - EXISTING_COUNT))
+          
+          if [ "$$FINAL_COUNT" -gt 0 ]; then
+            echo "✅ Footprints ready: $$FINAL_COUNT/$$TOTAL_COUNT"
+            
+            if [ "$$NEW_FETCHED" -gt 0 ]; then
+              echo "   • Reused: $$EXISTING_COUNT existing footprints"
+              echo "   • Fetched: $$NEW_FETCHED new footprints"
+            else
+              echo "   • All footprints were already cached"
+            fi
+            
+            if [ "$$FINAL_COUNT" -lt "$$TOTAL_COUNT" ]; then
+              MISSING=$$((TOTAL_COUNT - FINAL_COUNT))
+              echo "ℹ️  Missing $$MISSING footprints - will use buffer-based snapshots for those"
+            fi
+          else
+            echo "⚠️ No footprints found - all substations will use buffer-based snapshots"
+            printf "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude,Name,Voltages\n" > /workspace/data/footprints/footprints.csv
+          fi
+        else
+          echo "⚠️ OSM fetch failed - creating empty footprints.csv"
+          printf "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude,Name,Voltages\n" > /workspace/data/footprints/footprints.csv
+        fi
+        
+        # Report cache status
+        if [ -f /workspace/data/footprints/footprint_cache.json ]; then
+          CACHE_SIZE=$$(python3 -c "import json; print(len(json.load(open('/workspace/data/footprints/footprint_cache.json'))))" 2>/dev/null || echo "0")
+          echo "💾 Cache updated: $$CACHE_SIZE total entries saved for next run"
+        fi
 
   qgis_snapshots:
     build:
@@ -149,11 +211,8 @@ services:
             --skip_existing
         fi
 
-        # user-facing copy
-        mkdir -p /workspace/output/snapshots
-        cp -f /workspace/data/snapshots/*.png  /workspace/output/snapshots/ 2>/dev/null || true
-        cp -f /workspace/data/snapshots/*.pngw /workspace/output/snapshots/ 2>/dev/null || true
-        cp -f /workspace/data/snapshots/image_meters_per_px.csv /workspace/output/snapshots/ 2>/dev/null || true
+        # No copying - snapshots stay in data/ only
+        echo "✅ Snapshots generated in data/snapshots/"
 
   unet_infer:
     build:
@@ -163,6 +222,7 @@ services:
       - PYTHONPATH=/workspace
       - TORCH_HOME=/workspace/data/.cache/torch
       - HF_HOME=/workspace/data/.cache/huggingface
+      - PIPELINE_NO_IMAGES=${PIPELINE_NO_IMAGES:-false}
     volumes:
       - ./data:/workspace/data
       - ./output:/workspace/output
@@ -175,26 +235,26 @@ services:
       qgis_snapshots:
         condition: service_completed_successfully
     command:
-      - python
-      - /workspace/scripts/run_unet_inference.py
-      - --images_dir
-      - /workspace/data/snapshots
-      - --output_dir
-      - /workspace/output/unet_results
-      - --model_pth
-      - /workspace/models/unet.pth
-      - --encoder_name
-      - resnet34
-      - --encoder_weights
-      - imagenet
-      - --pattern
-      - "*.png"
-      - --device
-      - auto
-      - --allow_no_scale
-      - --scale_manifest_csv
-      - /workspace/data/snapshots/image_meters_per_px.csv
-      - --skip_existing
+      - bash
+      - -c
+      - |
+        if [ "$${PIPELINE_NO_IMAGES:-false}" = "true" ]; then
+          EXTRA_ARGS="--no_images"
+        else
+          EXTRA_ARGS=""
+        fi
+        python /workspace/scripts/run_unet_inference.py \
+          --images_dir /workspace/data/snapshots \
+          --output_dir /workspace/output/unet_results \
+          --model_pth /workspace/models/unet.pth \
+          --encoder_name resnet34 \
+          --encoder_weights imagenet \
+          --pattern "*.png" \
+          --device auto \
+          --allow_no_scale \
+          --scale_manifest_csv /workspace/data/snapshots/image_meters_per_px.csv \
+          --skip_existing \
+          $${EXTRA_ARGS}
 
   capacity_infer:
     build:
@@ -236,6 +296,7 @@ services:
     environment:
       - PYTHONPATH=/workspace
       - YOLO_CONFIG_DIR=/tmp/Ultralytics
+      - PIPELINE_NO_IMAGES=${PIPELINE_NO_IMAGES:-false}
     volumes:
       - ./data:/workspace/data
       - ./output:/workspace/output
@@ -252,18 +313,26 @@ services:
       - -lc
       - |
         set -euo pipefail
-        mkdir -p /workspace/output/yolo_results/annotated
+        mkdir -p /workspace/output/yolo_results
+        
+        if [ "$${PIPELINE_NO_IMAGES:-false}" = "true" ]; then
+          EXTRA_ARGS="--no-images"
+        else
+          mkdir -p /workspace/output/yolo_results/annotated
+          EXTRA_ARGS="--out_annotated_dir /workspace/output/yolo_results/annotated"
+        fi
+        
         python /workspace/scripts/run_yolo_inference.py \
           --images_dir /workspace/data/snapshots \
           --model_pt /workspace/models/yolo.pt \
           --out_csv /workspace/output/yolo_results/yolo_detections.csv \
           --summary_csv /workspace/output/yolo_results/yolo_summary.csv \
-          --out_annotated_dir /workspace/output/yolo_results/annotated \
           --pattern "*.png" \
           --conf 0.25 \
           --iou 0.45 \
           --device cpu \
-          --skip_existing
+          --skip_existing \
+          $${EXTRA_ARGS}
 
   score:
     build:

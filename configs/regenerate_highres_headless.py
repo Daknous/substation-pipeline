@@ -30,7 +30,7 @@ from qgis.core import (
     QgsField,
     QgsVectorDataProvider,
 )
-from qgis.PyQt.QtCore import QSize, QVariant
+from qgis.PyQt.QtCore import QSize, QMetaType
 
 from src.helpers.osm_ids import parse_osm_id_digits
 
@@ -177,10 +177,10 @@ def main():
             lyr = QgsVectorLayer("Polygon?crs=EPSG:4326", "footprints", "memory")
             pr: QgsVectorDataProvider = lyr.dataProvider()
             pr.addAttributes([
-                QgsField("osm_ref", QVariant.String),
-                QgsField("osm_id", QVariant.String),
-                QgsField("matched_ref", QVariant.String),
-                QgsField("method", QVariant.String),
+                QgsField("osm_ref", QMetaType.QString),
+                QgsField("osm_id", QMetaType.QString),
+                QgsField("matched_ref", QMetaType.QString),
+                QgsField("method", QMetaType.QString),
             ])
             lyr.updateFields()
 
