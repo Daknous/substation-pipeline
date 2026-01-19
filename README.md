@@ -1,6 +1,6 @@
-# Substation Extensibility Pipeline
+# Substation Analysis Pipeline
 
-Automated analysis of electrical substation satellite imagery to assess expansion potential using computer vision and machine learning.
+Automatic Electrical Substation Equipment Segmentation and Capacity Assessment from Satellite Imagery
 
 ## Quick Start
 
@@ -128,4 +128,3 @@ echo "osm_id,footprint_wkt,found,method,note,estimated_size_m,Latitude,Longitude
 
 ## License
 
-[Add license information]

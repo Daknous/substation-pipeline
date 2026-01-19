@@ -51,7 +51,7 @@ validate_files() {
     
     echo -e "${DIM}Checking requirements...${NC}"
     
-    # Check required files silently
+    # Check required files
     if [ ! -f input/substations.json ]; then
         print_error "input/substations.json missing"
         has_error=true
@@ -93,16 +93,30 @@ run() {
     validate_files
     echo ""
     
+    # Determine which service should be the final one
+    local final_service="score"
+    if [ -f "docker-compose.yml" ] && grep -q "aggregate:" docker-compose.yml; then
+        final_service="aggregate"
+    fi
+    
+    # Run the pipeline with appropriate mode
     if [ "$with_images" = "with-images" ]; then
         print_info "Mode: WITH images"
-        PIPELINE_NO_IMAGES=false docker compose $COMPOSE_FILES up --abort-on-container-exit
+        PIPELINE_NO_IMAGES=false docker compose $COMPOSE_FILES up --exit-code-from $final_service
     else
         if grep -q "PIPELINE_NO_IMAGES=true" .env 2>/dev/null; then
             print_info "Mode: CSV only (no images)"
         else
             print_info "Mode: Full output (with images)"
         fi
-        docker compose $COMPOSE_FILES up --abort-on-container-exit
+        docker compose $COMPOSE_FILES up --exit-code-from $final_service
+    fi
+    
+    # Check if pipeline succeeded
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        print_error "Pipeline failed with exit code: $exit_code"
+        return $exit_code
     fi
     
     echo ""
@@ -114,7 +128,7 @@ run_service() {
     if [ -z "$service" ]; then
         print_error "Specify a service name"
         echo ""
-        echo "Available:"
+        echo "Available services:"
         docker compose $COMPOSE_FILES config --services | sed 's/^/  • /'
         exit 1
     fi
@@ -126,8 +140,24 @@ run_service() {
 status() {
     print_header
     
-    # Check if results exist
-    if [ -f output/score_results/substations_scored.csv ]; then
+    # Check for aggregated results first
+    if [ -f output/aggregated_results.csv ]; then
+        local total=$(tail -n +2 output/aggregated_results.csv | wc -l | tr -d ' ')
+        print_success "Processed $total substations (aggregated)"
+        
+        # Check output mode
+        if [ -d output/unet_results/overlays ] || [ -d output/yolo_results/annotated ]; then
+            echo -e "${DIM}Output: Full (with images)${NC}"
+        else
+            echo -e "${DIM}Output: CSV only${NC}"
+        fi
+        
+        echo ""
+        echo "Results:"
+        echo -e "  • ${GREEN}output/aggregated_results.csv${NC}"
+        echo -e "  • ${GREEN}output/aggregated_results_simple.csv${NC}"
+        
+    elif [ -f output/score_results/substations_scored.csv ]; then
         local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
         print_success "Processed $total substations"
         
@@ -147,7 +177,13 @@ status() {
 }
 
 show_results_compact() {
-    if [ -f output/score_results/substations_scored.csv ]; then
+    if [ -f output/aggregated_results.csv ]; then
+        local total=$(tail -n +2 output/aggregated_results.csv | wc -l | tr -d ' ')
+        print_success "Complete: $total substations processed & aggregated"
+        echo -e "${DIM}Results:${NC}"
+        echo -e "  • ${GREEN}output/aggregated_results.csv${NC}"
+        echo -e "  • ${GREEN}output/aggregated_results_simple.csv${NC}"
+    elif [ -f output/score_results/substations_scored.csv ]; then
         local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
         print_success "Complete: $total substations processed"
         echo -e "${DIM}Results in: output/score_results/${NC}"
@@ -157,7 +193,23 @@ show_results_compact() {
 }
 
 show_results() {
-    if [ -f output/score_results/substations_scored.csv ]; then
+    if [ -f output/aggregated_results.csv ]; then
+        local total=$(tail -n +2 output/aggregated_results.csv | wc -l | tr -d ' ')
+        echo ""
+        echo "Results Summary (Aggregated)"
+        echo -e "${DIM}────────────────────────────${NC}"
+        echo "Substations: $total"
+        echo "Output: output/aggregated_results.csv"
+        
+        # Simple preview - first 3 lines, key columns only
+        echo ""
+        echo -e "${DIM}Sample (first 3):${NC}"
+        echo -e "${DIM}─────────────────${NC}"
+        tail -n +1 output/aggregated_results_simple.csv 2>/dev/null | head -n 4 | \
+            awk -F',' '{printf "%-12s %-30s %-8s %-12s\n", $1, substr($2,1,30), $5, $8}' | \
+            sed '1s/^/\x1b[1m/; 1s/$/\x1b[0m/'
+            
+    elif [ -f output/score_results/substations_scored.csv ]; then
         local total=$(tail -n +2 output/score_results/substations_scored.csv | wc -l | tr -d ' ')
         echo ""
         echo "Results Summary"
@@ -165,7 +217,7 @@ show_results() {
         echo "Substations: $total"
         echo "Output: output/score_results/substations_scored.csv"
         
-        # Simple preview - just first 3 lines, key columns only
+        # Simple preview - first 3 lines, key columns only
         echo ""
         echo -e "${DIM}Sample (first 3):${NC}"
         echo -e "${DIM}─────────────────${NC}"
@@ -183,35 +235,123 @@ stop() {
     print_success "Stopped"
 }
 
-# Replace the clean() function (lines 189-197) with this improved version:
-
 clean() {
     echo -n "Clean all outputs? (y/N): "
     read -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Clean files but preserve .gitkeep
+        # Clean outputs
         find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        
+        # Clean snapshots
         find data/snapshots -type f ! -name '.gitkeep' -delete 2>/dev/null || true
-        find data/footprints -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        
+        # Clean manifests
         find data/manifests -type f ! -name '.gitkeep' -delete 2>/dev/null || true
         
-        # Remove empty subdirectories (but not the main directories with .gitkeep)
+        # Clean footprints BUT PRESERVE footprints.csv if it exists
+        if [ -f data/footprints/footprints.csv ]; then
+            # Save footprints.csv temporarily
+            cp data/footprints/footprints.csv /tmp/footprints_preserved.csv
+            
+            # Clean the directory
+            find data/footprints -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            
+            # Restore footprints.csv
+            mv /tmp/footprints_preserved.csv data/footprints/footprints.csv
+            
+            FOOTPRINT_COUNT=$(tail -n +2 data/footprints/footprints.csv | wc -l | tr -d ' ')
+            echo "  Preserved footprints.csv ($FOOTPRINT_COUNT entries)"
+        else
+            # No footprints.csv to preserve
+            find data/footprints -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+        fi
+        
+        # Remove empty subdirectories
         find output -mindepth 2 -type d -empty -delete 2>/dev/null || true
         find data -mindepth 2 -type d -empty -delete 2>/dev/null || true
         
-        # Ensure .gitkeep files exist (restore if accidentally deleted)
+        # Ensure .gitkeep files exist
         for dir in output/capacity_results output/score_results output/unet_results output/yolo_results \
                    data/snapshots data/footprints data/manifests; do
             mkdir -p "$dir"
             [ ! -f "$dir/.gitkeep" ] && touch "$dir/.gitkeep"
         done
         
-        print_success "Cleaned (preserved .gitkeep files)"
+        print_success "Cleaned outputs (preserved footprints.csv)"
     fi
 }
 
-
+clean_menu() {
+    print_header
+    echo "What would you like to clean?"
+    echo ""
+    echo "  1) Output files only (preserve all data)"
+    echo "  2) Output + snapshots (preserve footprints & manifests)"
+    echo "  3) Everything except footprints.csv"
+    echo "  4) Everything (full clean)"
+    echo "  5) Cancel"
+    echo ""
+    read -p "Choice [1-5]: " -n 1 -r
+    echo
+    
+    case $REPLY in
+        1)
+            find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            print_success "Cleaned output files only"
+            ;;
+        2)
+            find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            find data/snapshots -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            print_success "Cleaned outputs and snapshots"
+            ;;
+        3)
+            find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            find data/snapshots -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            find data/manifests -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+            
+            # Preserve footprints.csv
+            if [ -f data/footprints/footprints.csv ]; then
+                find data/footprints -type f ! -name '.gitkeep' ! -name 'footprints.csv' -delete 2>/dev/null || true
+                FOOTPRINT_COUNT=$(tail -n +2 data/footprints/footprints.csv | wc -l | tr -d ' ')
+                print_success "Cleaned (preserved footprints.csv with $FOOTPRINT_COUNT entries)"
+            else
+                find data/footprints -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+                print_success "Cleaned"
+            fi
+            ;;
+        4)
+            # Full clean - ask for confirmation
+            echo -n "Are you SURE? This will delete footprints.csv too! (y/N): "
+            read -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                # Backup footprints.csv if it exists
+                if [ -f data/footprints/footprints.csv ]; then
+                    FOOTPRINT_COUNT=$(tail -n +2 data/footprints/footprints.csv | wc -l | tr -d ' ')
+                    cp data/footprints/footprints.csv "/tmp/footprints_backup_$(date +%Y%m%d_%H%M%S).csv"
+                    print_info "Backed up $FOOTPRINT_COUNT footprints to /tmp/"
+                fi
+                
+                find output -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+                find data -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+                print_success "Full clean complete"
+            else
+                print_info "Cancelled"
+            fi
+            ;;
+        *)
+            print_info "Cancelled"
+            ;;
+    esac
+    
+    # Always ensure .gitkeep files exist
+    for dir in output/capacity_results output/score_results output/unet_results output/yolo_results \
+               data/snapshots data/footprints data/manifests; do
+        mkdir -p "$dir"
+        [ ! -f "$dir/.gitkeep" ] && touch "$dir/.gitkeep"
+    done
+}
 
 logs() {
     local service="${1:-}"
@@ -231,11 +371,13 @@ show_help() {
     echo "  ${GREEN}run${NC}              Run pipeline"
     echo "  ${GREEN}run with-images${NC}  Run with all images"
     echo "  ${GREEN}status${NC}           Check status"
+    echo "  ${GREEN}results${NC}          Show detailed results"
     echo "  ${GREEN}clean${NC}            Clean outputs"
     echo ""
     echo "  service <name>   Run specific service"
     echo "  logs [service]   View logs"
     echo "  stop             Stop pipeline"
+    echo "  build            Build containers"
     echo "  help             Show this help"
     
     echo ""
@@ -244,6 +386,12 @@ show_help() {
         echo -e "${DIM}• Images: Disabled (CSV only)${NC}"
     else
         echo -e "${DIM}• Images: Enabled${NC}"
+    fi
+    
+    # Show footprints status
+    if [ -f data/footprints/footprints.csv ]; then
+        local footprint_count=$(tail -n +2 data/footprints/footprints.csv | wc -l | tr -d ' ')
+        echo -e "${DIM}• Footprints: $footprint_count pre-fetched${NC}"
     fi
 }
 
@@ -270,6 +418,9 @@ case "$1" in
     status)
         status
         ;;
+    results)
+        show_results
+        ;;
     stop)
         stop
         ;;
@@ -278,7 +429,7 @@ case "$1" in
         logs "$@"
         ;;
     clean)
-        clean
+        clean_menu
         ;;
     help|--help|-h)
         show_help
